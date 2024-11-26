@@ -1,6 +1,8 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, concat_ws, collect_list
 
+# Step 1: Create a Spark session
+spark = SparkSession.builder.appName("NestedExecutionOrder").getOrCreate()
 
 # Step 2: Define the input data
 data = [
@@ -13,7 +15,8 @@ data = [
     ("pd_cts", "test", "rd_bbc", "ad12"),
     ("pd_cts", "test1", "rd_ccb", "abc1"),
     ("pd_cts", "test1", "rd_ccb", "abc2"),
-    ("pd_cts", "test1", "rd_ccb", "abc3")
+    ("pd_cts", "test1", "rd_ccb", "abc3"),
+    ("pd_cts", "test1", "pd_cts", "test1")  # Example of a self-cycle
 ]
 
 columns = ["db", "tbl", "srcdb", "srctbl"]
@@ -30,20 +33,24 @@ dependencies = dependencies_df.groupBy("table") \
     .collect()
 
 # Convert to dictionary for easy processing
-dependencies_dict = {row["table"]: sorted(row["dependencies"]) for row in dependencies}  # Sort for consistent order
+dependencies_dict = {row["table"]: sorted(row["dependencies"]) for row in dependencies}
 
-# Step 5: Function to get execution order with multiple nested levels
-def get_execution_order(dependencies):
+# Step 5: Function to get execution order and handle cycles
+def get_execution_order_with_cycles(dependencies):
     visited = set()  # Tracks all tables that are fully processed
     stack = set()    # Tracks the current path in recursion to detect cycles
     execution_order = []  # Final order of execution
+    one_time_load_required = []  # Tables that are marked as one-time load due to cycles
 
     def visit(table):
         if table in stack:
-            raise ValueError(f"Cycle detected: {' -> '.join(stack)} -> {table}")
+            # If a cycle is detected, add it to the one-time load list and skip further processing
+            if table not in one_time_load_required:
+                one_time_load_required.append(table)
+            return
         if table not in visited:
             stack.add(table)  # Add the table to the current recursion stack
-            # Recursively visit dependencies first, in sorted order for consistent results
+            # Recursively visit dependencies first
             for dependency in sorted(dependencies.get(table, [])):
                 visit(dependency)
             stack.remove(table)  # Remove from the stack after processing
@@ -55,13 +62,17 @@ def get_execution_order(dependencies):
         if table not in visited:
             visit(table)
 
-    return execution_order
+    return execution_order, one_time_load_required
 
 # Step 6: Generate execution order
 try:
-    execution_order = get_execution_order(dependencies_dict)
+    execution_order, one_time_load_required = get_execution_order_with_cycles(dependencies_dict)
     print("Execution Order:")
     for table in execution_order:
         print(table)
-except ValueError as e:
+    if one_time_load_required:
+        print("\nOne-Time Load Required Tables (Cycles Detected):")
+        for table in one_time_load_required:
+            print(table)
+except Exception as e:
     print(str(e))
